@@ -18,30 +18,36 @@ STOCK_KEYWORDS = [
     "宏观经济数据", "央行政策", "财经新闻 头条", "主力资金流向"
 ]
 
-# 限定搜索的热门炒股资讯网站（新增财联社、每日经济新闻）
-TARGET_SITES = [
-    "eastmoney.com",      # 东方财富
-    "10jqka.com.cn",      # 同花顺
-    "finance.sina.com.cn",# 新浪财经
-    "stockstar.com",      # 证券之星
-    "cs.com.cn",          # 中国证券报
-    "stcn.com",           # 证券时报
-    "cls.cn",             # 财联社
-    "nbd.com.cn"          # 每日经济新闻
-]
+# 网站域名 -> 中文名称映射
+SITE_NAMES = {
+    "eastmoney.com": "东方财富",
+    "10jqka.com.cn": "同花顺",
+    "finance.sina.com.cn": "新浪财经",
+    "stockstar.com": "证券之星",
+    "cs.com.cn": "中国证券报",
+    "stcn.com": "证券时报",
+    "cls.cn": "财联社",
+    "nbd.com.cn": "每日经济新闻"
+}
+
+TARGET_SITES = list(SITE_NAMES.keys())  # 使用映射中的域名
 
 # 历史记录文件路径
 HISTORY_FILE = "history.json"
 
-# AI 提示词
-SYSTEM_PROMPT = """你是一个专业的股票财经分析师。
+# 当前日期时间（用于 prompt）
+CURRENT_DATETIME = datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")
+
+# AI 提示词（允许详细总结，不限制一句话）
+SYSTEM_PROMPT = f"""你是一个专业的股票财经分析师。当前时间是 {CURRENT_DATETIME}。
 请根据我提供的搜索结果，提取出最重要的股票推荐信息、热点板块、经济新闻。
-每条信息用一句话概括，并附上来源网站。
+对于重点信息（如重要股票推荐、重大政策变化、市场大幅波动等），请适当展开详细说明，可以分析原因或影响。
+每条信息标注来源网站名称。
 最后按重要性排序，用清晰的格式呈现。"""
 
-# ================== 1. 联网搜索（限定网站） ==================
+# ================== 1. 联网搜索（限定网站，返回带中文名称） ==================
 def search_news(keywords, sites, num_results_per_site=2):
-    """在指定网站内搜索关键词，返回新闻列表（含链接）"""
+    """在指定网站内搜索关键词，返回新闻列表（含中文来源）"""
     all_news = []
     with DDGS() as ddgs:
         for kw in keywords:
@@ -53,11 +59,13 @@ def search_news(keywords, sites, num_results_per_site=2):
                     for r in results:
                         link = r.get('href')
                         if link:
+                            # 获取网站中文名称，如果未定义则使用域名
+                            source_name = SITE_NAMES.get(site, site)
                             all_news.append({
                                 "title": r.get('title'),
                                 "snippet": r.get('body'),
                                 "link": link,
-                                "source": site,
+                                "source": source_name,   # 中文名称
                                 "timestamp": datetime.now().isoformat()
                             })
                 except Exception as e:
@@ -70,9 +78,9 @@ def search_news(keywords, sites, num_results_per_site=2):
             unique[link] = item
     return list(unique.values())
 
-# ================== 2. AI 总结 ==================
+# ================== 2. AI 总结（允许详细） ==================
 def summarize_news(news_list, retries=2):
-    """调用 DeepSeek 总结新闻"""
+    """调用 DeepSeek 总结新闻，可详细展开重点"""
     if not news_list:
         return "今日暂无新财经资讯。"
 
@@ -83,7 +91,7 @@ def summarize_news(news_list, retries=2):
     )
 
     news_text = json.dumps(news_list, ensure_ascii=False, indent=2)
-    user_prompt = f"请用中文总结以下最新新闻，形成一份简报：\n\n{news_text}"
+    user_prompt = f"请用中文总结以下最新新闻，形成一份简报。对于重要信息可以详细分析：\n\n{news_text}"
 
     for attempt in range(retries):
         try:
@@ -110,7 +118,6 @@ def summarize_news(news_list, retries=2):
 
 # ================== 3. 历史记录管理 ==================
 def load_history():
-    """从本地文件加载已推送的链接集合"""
     if not os.path.exists(HISTORY_FILE):
         return set()
     with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
@@ -118,11 +125,10 @@ def load_history():
         return set(data.get("pushed_links", []))
 
 def save_history(links):
-    """保存已推送的链接集合到文件"""
     with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
         json.dump({"pushed_links": list(links)}, f, ensure_ascii=False, indent=2)
 
-# ================== 4. 推送企业微信（支持长消息拆分） ==================
+# ================== 4. 推送企业微信 ==================
 def split_long_message(content, max_bytes=4000):
     if len(content.encode('utf-8')) <= max_bytes:
         return [content]
@@ -189,36 +195,55 @@ def send_to_serverchan(content):
     return False
 
 def format_for_wecom(report):
+    """优化企业微信 Markdown 显示"""
     lines = report.split('\n')
-    formatted = [line + "  " for line in lines if line.strip()]
+    formatted = []
+    for line in lines:
+        if line.strip():
+            formatted.append(line + "  ")
     separator = "\n<font color=\"comment\">---</font>\n"
     return separator.join(formatted)
 
-# ================== 主程序 ==================
+# ================== 5. 提交历史到仓库（可选） ==================
 def commit_and_push():
-    """将 history.json 的变更提交并推送到仓库（需在 workflow 中配置 git）"""
     import subprocess
+    # 检查是否有变更
+    result = subprocess.run(["git", "status", "--porcelain", HISTORY_FILE], capture_output=True, text=True)
+    if not result.stdout.strip():
+        print("没有需要提交的变更")
+        return True
     try:
-        subprocess.run(["git", "config", "user.email", "bot@example.com"], check=True)
-        subprocess.run(["git", "config", "user.name", "News Bot"], check=True)
+        subprocess.run(["git", "config", "--global", "user.email", "bot@github-actions.com"], check=True)
+        subprocess.run(["git", "config", "--global", "user.name", "News Bot"], check=True)
         subprocess.run(["git", "add", HISTORY_FILE], check=True)
-        subprocess.run(["git", "commit", "-m", "Update news history"], check=True)
-        subprocess.run(["git", "push"], check=True)
-        print("历史记录已提交到仓库")
+        subprocess.run(["git", "commit", "-m", f"Update news history - {datetime.now().isoformat()}"], check=True)
+        remote_url = subprocess.run(["git", "config", "--get", "remote.origin.url"], capture_output=True, text=True, check=True).stdout.strip()
+        token = os.environ.get("GITHUB_TOKEN")
+        if token and remote_url.startswith("https://"):
+            remote_url = remote_url.replace("https://", f"https://x-access-token:{token}@")
+            subprocess.run(["git", "push", remote_url, "HEAD:main"], check=True)
+        else:
+            subprocess.run(["git", "push"], check=True)
+        print("历史记录已提交并推送")
+        return True
     except Exception as e:
         print(f"提交历史记录失败: {e}")
+        return False
 
+# ================== 主程序 ==================
 if __name__ == "__main__":
     print("========== 股票新闻机器人启动 ==========")
-    # 1. 加载已推送的历史链接
+    print(f"当前时间: {CURRENT_DATETIME}")
+    
+    # 1. 加载历史
     old_links = load_history()
     print(f"已有历史新闻数: {len(old_links)}")
     
-    # 2. 搜索最新新闻
+    # 2. 搜索新新闻
     all_news = search_news(STOCK_KEYWORDS, TARGET_SITES, num_results_per_site=2)
     print(f"本次搜索到 {len(all_news)} 条新闻")
     
-    # 3. 过滤出新新闻
+    # 3. 过滤新新闻
     new_news = [item for item in all_news if item['link'] not in old_links]
     print(f"其中新新闻: {len(new_news)} 条")
     
@@ -226,29 +251,32 @@ if __name__ == "__main__":
         print("没有新新闻，跳过推送")
         exit(0)
     
-    # 4. AI 总结新新闻
+    # 4. AI 总结
     report = summarize_news(new_news)
     
-    # 5. 推送到企业微信（自动拆分）
+    # 5. 推送
     if WECHAT_WEBHOOK_KEY or WECHAT_WEBHOOK_URL:
-        formatted = format_for_wecom(report)
+        # 在报告开头加上时间标题
+        title = f"## 📈 股市资讯简报\n**{CURRENT_DATETIME}**\n\n"
+        full_report = title + report
+        formatted = format_for_wecom(full_report)
         parts = split_long_message(formatted, max_bytes=4000)
         success = True
         for idx, part in enumerate(parts, 1):
-            title = f"**【股票资讯】第{idx}/{len(parts)}部分**\n\n"
-            if not send_to_wecom(title + part, msg_type="markdown"):
+            header = f"**【股市资讯】第{idx}/{len(parts)}部分**\n\n"
+            if not send_to_wecom(header + part, msg_type="markdown"):
                 success = False
         if not success and SERVERCHAN_SENDKEY:
             send_to_serverchan(report)
     elif SERVERCHAN_SENDKEY:
         send_to_serverchan(report)
     
-    # 6. 更新历史记录并保存
+    # 6. 更新历史
     new_links = old_links.union({item['link'] for item in new_news})
     save_history(new_links)
     print(f"历史记录已更新，当前总数: {len(new_links)}")
     
-    # 7. 提交并推送 history.json 到仓库（需要 git 权限）
+    # 7. 提交历史（可选，如果失败不影响主流程）
     commit_and_push()
     
     print("========== 运行结束 ==========")
