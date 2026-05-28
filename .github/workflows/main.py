@@ -2,53 +2,47 @@ import requests
 import json
 import os
 from openai import OpenAI
-import feedparser
+from ddgs import DDGS
 
 # ================== 配置区域 ==================
-SEARCH_ENGINE_ID = "你的 谷歌可编程搜索引擎 ID"  # 你获得的搜索ID
-GOOGLE_API_KEY = "你的 谷歌自定义搜索 API Key"  # 你申请的API Key
 DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY')
 PUSH_KEY = os.environ.get('SERVERCHAN_SENDKEY')
 
-# 在这里修改你想追踪的股票或新闻关键词，用逗号隔开
-STOCK_KEYWORDS = ["协鑫集成", "铜陵有色", "南山铝业", "金开新能", "三峡能源", "科技新闻", "光伏政策", "美联储"]
+# 在这里修改你想追踪的关键词（股票、新闻等）
+STOCK_KEYWORDS = ["协鑫集成", "铜陵有色", "南山铝业", "金开新能", "三峡能源", "光伏政策", "AI算力"]
 
-# AI 总结的指示语，你可以根据喜好修改
-SYSTEM_PROMPT = """你是一个专业的新闻分析师，擅长总结和提炼信息。
-请根据我提供的搜索结果，提取最重要的几条新闻。
-要求：每条新闻用一句话概括，语言简洁、客观，并附上来源。最终结果需要清晰易读。"""
+# AI 的提示词（可以改成你喜欢的风格）
+SYSTEM_PROMPT = """你是一个专业的财经新闻分析师。
+请根据我提供的搜索结果，总结出最重要的几条新闻。
+每条新闻用一句话概括，语言简洁，并附上来源。
+最后用清晰的格式呈现。"""
 
-# ================== 功能函数：1. 联网搜索 ==================
+# ================== 1. 联网搜索（使用 ddgs） ==================
 def search_news(keywords, num_results=3):
-    """使用 Google 可编程搜索引擎搜索新闻"""
+    """使用 DuckDuckGo 搜索新闻"""
     all_news = []
-    for kw in keywords:
-        print(f"正在搜索：{kw}")
-        # 构建搜索URL
-        search_url = f"https://www.googleapis.com/customsearch/v1?key={GOOGLE_API_KEY}&cx={SEARCH_ENGINE_ID}&q={kw}&num={num_results}"
-        try:
-            response = requests.get(search_url, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                items = data.get('items', [])
-                for item in items:
+    with DDGS() as ddgs:
+        for kw in keywords:
+            print(f"正在搜索：{kw}")
+            try:
+                # 搜索网页（包含新闻）
+                results = list(ddgs.text(f"{kw} 最新消息", region="cn", safesearch="moderate", max_results=num_results))
+                for r in results:
                     all_news.append({
-                        "title": item['title'],
-                        "snippet": item.get('snippet', ''),
-                        "link": item['link'],
-                        "source": item.get('displayLink', '')
+                        "title": r.get('title'),
+                        "snippet": r.get('body'),
+                        "link": r.get('href'),
+                        "source": r.get('href').split('/')[2] if r.get('href') else '未知'
                     })
-            else:
-                print(f"搜索 {kw} 失败，状态码：{response.status_code}")
-        except Exception as e:
-            print(f"搜索 {kw} 时发生错误: {e}")
+            except Exception as e:
+                print(f"搜索 {kw} 时出错: {e}")
     return all_news
 
-# ================== 功能函数：2. AI 总结 ==================
+# ================== 2. AI 总结 ==================
 def summarize_news(news_list):
-    """调用 DeepSeek 大模型来总结新闻"""
+    """调用 DeepSeek 大模型总结新闻"""
     if not news_list:
-        return "抱歉，今天没有搜索到相关的新闻。"
+        return "今天没有搜索到相关新闻。"
 
     client = OpenAI(
         api_key=DEEPSEEK_API_KEY,
@@ -56,7 +50,7 @@ def summarize_news(news_list):
     )
 
     news_text = json.dumps(news_list, ensure_ascii=False, indent=2)
-    user_prompt = f"请用中文总结以下最新的股票和财经新闻，形成一份简报。\n\n{news_text}"
+    user_prompt = f"请用中文总结以下最新新闻，形成一份简报：\n\n{news_text}"
 
     try:
         response = client.chat.completions.create(
@@ -71,18 +65,18 @@ def summarize_news(news_list):
         summary = response.choices[0].message.content
         return summary
     except Exception as e:
-        print(f"调用 AI 总结失败: {e}")
-        return f"AI 总结失败，请查看原始新闻。\n\n{news_text}"
+        print(f"AI 总结失败: {e}")
+        return f"AI 总结失败，请查看原始新闻：\n\n{news_text}"
 
-# ================== 功能函数：3. 推送到微信 ==================
+# ================== 3. 推送到微信 ==================
 def send_to_wechat(content):
-    """通过 Server酱 将消息推送到微信"""
+    """通过 Server酱 推送到微信"""
     if not PUSH_KEY:
         print("未配置 PUSH_KEY，无法推送")
         return False
     url = f"https://sctapi.ftqq.com/{PUSH_KEY}.send"
     data = {
-        "title": "【您的专属财经早报】",
+        "title": "【每日财经资讯】",
         "desp": content
     }
     try:
@@ -94,18 +88,15 @@ def send_to_wechat(content):
             print(f"推送失败，状态码：{response.status_code}")
             return False
     except Exception as e:
-        print(f"推送时发生错误: {e}")
+        print(f"推送出错: {e}")
         return False
 
-# ================== 主程序逻辑 ==================
+# ================== 主程序 ==================
 if __name__ == "__main__":
-    print("========== 财经早报机器人启动 ==========")
-    # Step 1: 联网搜索
-    raw_news = search_news(STOCK_KEYWORDS, num_results=3)
-    print(f"共搜索到 {len(raw_news)} 条原始新闻")
-    # Step 2: AI 总结
-    final_report = summarize_news(raw_news)
-    print("新闻总结完成")
-    # Step 3: 推送到微信
-    send_to_wechat(final_report)
-    print("========== 财经早报机器人运行结束 ==========")
+    print("========== 新闻机器人启动 ==========")
+    news_list = search_news(STOCK_KEYWORDS, num_results=3)
+    print(f"找到 {len(news_list)} 条新闻")
+    report = summarize_news(news_list)
+    print("总结完成，正在推送...")
+    send_to_wechat(report)
+    print("========== 运行结束 ==========")
