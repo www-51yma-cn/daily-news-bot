@@ -1,59 +1,80 @@
 import os
-import requests
 import json
 import time
+import requests
 from openai import OpenAI
 from ddgs import DDGS
+from datetime import datetime
 
 # ================== 配置区域 ==================
 DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY')
-# 企业微信机器人 Webhook Key（只需要 key= 后面的参数）
 WECHAT_WEBHOOK_KEY = os.environ.get('WECHAT_WEBHOOK_KEY')
-# 完整 Webhook URL（可选，如果直接存完整 URL 就用这个）
 WECHAT_WEBHOOK_URL = os.environ.get('WECHAT_WEBHOOK_URL')
-# 备用：Server酱（可选，留空则不启用）
 SERVERCHAN_SENDKEY = os.environ.get('SERVERCHAN_SENDKEY')
 
-# 消息长度限制（字节）
-MAX_TEXT_LEN = 2048   # 文本消息最大长度
-MAX_MARKDOWN_LEN = 4096  # Markdown 消息最大长度
+# 搜索关键词
+STOCK_KEYWORDS = [
+    "今日股票推荐", "机构推荐个股", "A股热点板块", "短线金股",
+    "宏观经济数据", "央行政策", "财经新闻 头条", "主力资金流向"
+]
 
-# 在这里修改你想追踪的关键词
-STOCK_KEYWORDS = ["协鑫集成", "铜陵有色", "南山铝业", "金开新能", "三峡能源", "光伏政策", "AI算力"]
+# 限定搜索的热门炒股资讯网站（新增财联社、每日经济新闻）
+TARGET_SITES = [
+    "eastmoney.com",      # 东方财富
+    "10jqka.com.cn",      # 同花顺
+    "finance.sina.com.cn",# 新浪财经
+    "stockstar.com",      # 证券之星
+    "cs.com.cn",          # 中国证券报
+    "stcn.com",           # 证券时报
+    "cls.cn",             # 财联社
+    "nbd.com.cn"          # 每日经济新闻
+]
 
-# AI 的提示词
-SYSTEM_PROMPT = """你是一个专业的财经新闻分析师。
-请根据我提供的搜索结果，总结出最重要的几条新闻。
-每条新闻用一句话概括，语言简洁，并附上来源。
-最后用清晰的格式呈现。"""
+# 历史记录文件路径
+HISTORY_FILE = "history.json"
 
+# AI 提示词
+SYSTEM_PROMPT = """你是一个专业的股票财经分析师。
+请根据我提供的搜索结果，提取出最重要的股票推荐信息、热点板块、经济新闻。
+每条信息用一句话概括，并附上来源网站。
+最后按重要性排序，用清晰的格式呈现。"""
 
-# ================== 1. 联网搜索 ==================
-def search_news(keywords, num_results=3):
-    """使用 DuckDuckGo 搜索新闻"""
+# ================== 1. 联网搜索（限定网站） ==================
+def search_news(keywords, sites, num_results_per_site=2):
+    """在指定网站内搜索关键词，返回新闻列表（含链接）"""
     all_news = []
     with DDGS() as ddgs:
         for kw in keywords:
-            print(f"正在搜索：{kw}")
-            try:
-                results = list(ddgs.text(f"{kw} 最新消息", region="cn", safesearch="moderate", max_results=num_results))
-                for r in results:
-                    all_news.append({
-                        "title": r.get('title'),
-                        "snippet": r.get('body'),
-                        "link": r.get('href'),
-                        "source": r.get('href').split('/')[2] if r.get('href') else '未知'
-                    })
-            except Exception as e:
-                print(f"搜索 {kw} 时出错: {e}")
-    return all_news
-
+            for site in sites:
+                query = f"{kw} site:{site}"
+                print(f"正在搜索：{query}")
+                try:
+                    results = list(ddgs.text(query, region="cn", safesearch="moderate", max_results=num_results_per_site))
+                    for r in results:
+                        link = r.get('href')
+                        if link:
+                            all_news.append({
+                                "title": r.get('title'),
+                                "snippet": r.get('body'),
+                                "link": link,
+                                "source": site,
+                                "timestamp": datetime.now().isoformat()
+                            })
+                except Exception as e:
+                    print(f"搜索 {query} 时出错: {e}")
+    # 去重（基于链接）
+    unique = {}
+    for item in all_news:
+        link = item['link']
+        if link not in unique:
+            unique[link] = item
+    return list(unique.values())
 
 # ================== 2. AI 总结 ==================
 def summarize_news(news_list, retries=2):
-    """调用 DeepSeek 大模型总结新闻，带超时和重试机制"""
+    """调用 DeepSeek 总结新闻"""
     if not news_list:
-        return "今天没有搜索到相关新闻。"
+        return "今日暂无新财经资讯。"
 
     client = OpenAI(
         api_key=DEEPSEEK_API_KEY,
@@ -66,7 +87,7 @@ def summarize_news(news_list, retries=2):
 
     for attempt in range(retries):
         try:
-            print(f"正在尝试调用 AI，第 {attempt + 1} 次...")
+            print(f"正在调用 AI，第 {attempt + 1} 次...")
             response = client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[
@@ -78,135 +99,156 @@ def summarize_news(news_list, retries=2):
                 timeout=30.0,
             )
             summary = response.choices[0].message.content
-            print("AI 调用成功。")
+            print("AI 总结成功")
             return summary
         except Exception as e:
             print(f"AI 总结失败 (尝试 {attempt + 1}/{retries}): {e}")
             if attempt < retries - 1:
-                print("等待 5 秒后重试...")
                 time.sleep(5)
             else:
-                return f"AI 总结在重试 {retries} 次后依然失败，错误：{e}\n\n以下是原始新闻数据：\n\n{news_text}"
+                return f"AI 总结失败，错误：{e}\n\n原始新闻数据：\n{news_text[:2000]}"
 
+# ================== 3. 历史记录管理 ==================
+def load_history():
+    """从本地文件加载已推送的链接集合"""
+    if not os.path.exists(HISTORY_FILE):
+        return set()
+    with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+        return set(data.get("pushed_links", []))
 
-# ================== 3. 企业微信推送 ==================
+def save_history(links):
+    """保存已推送的链接集合到文件"""
+    with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+        json.dump({"pushed_links": list(links)}, f, ensure_ascii=False, indent=2)
+
+# ================== 4. 推送企业微信（支持长消息拆分） ==================
+def split_long_message(content, max_bytes=4000):
+    if len(content.encode('utf-8')) <= max_bytes:
+        return [content]
+    messages = []
+    paragraphs = content.split('\n')
+    current_msg = ""
+    for para in paragraphs:
+        test_msg = current_msg + para + '\n'
+        if len(test_msg.encode('utf-8')) <= max_bytes:
+            current_msg = test_msg
+        else:
+            if current_msg:
+                messages.append(current_msg)
+                current_msg = ""
+            if len(para.encode('utf-8')) > max_bytes:
+                for i in range(0, len(para), max_bytes):
+                    messages.append(para[i:i+max_bytes])
+            else:
+                current_msg = para + '\n'
+    if current_msg:
+        messages.append(current_msg)
+    return messages
+
 def send_to_wecom(content, msg_type="markdown"):
-    """
-    使用企业微信机器人推送消息
-    msg_type: "text" 或 "markdown"
-    """
     if not WECHAT_WEBHOOK_KEY and not WECHAT_WEBHOOK_URL:
-        print("未配置企业微信 Webhook，跳过推送")
+        print("未配置企业微信 Webhook")
         return False
-
-    # 处理内容长度限制
-    if msg_type == "text" and len(content.encode('utf-8')) > MAX_TEXT_LEN:
-        content = content[:MAX_TEXT_LEN - 100] + "\n\n...（消息过长已截断）"
-    elif msg_type == "markdown" and len(content.encode('utf-8')) > MAX_MARKDOWN_LEN:
-        content = content[:MAX_MARKDOWN_LEN - 100] + "\n\n...（消息过长已截断）"
-
-    # 构建请求体
-    if msg_type == "text":
-        payload = {
-            "msgtype": "text",
-            "text": {
-                "content": content,
-                "mentioned_list": ["@all"]  # 可选：@所有人
-            }
-        }
-    else:
-        payload = {
-            "msgtype": "markdown",
-            "markdown": {
-                "content": content
-            }
-        }
-
-    # 构建 Webhook URL
     if WECHAT_WEBHOOK_URL:
         webhook_url = WECHAT_WEBHOOK_URL
     else:
         webhook_url = f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={WECHAT_WEBHOOK_KEY}"
-
-    try:
-        response = requests.post(webhook_url, json=payload, timeout=10)
-        result = response.json()
-
-        if result.get('errcode') == 0:
-            print(f"企业微信推送成功！")
-            return True
-        elif result.get('errcode') == 45009:
-            print(f"企业微信推送失败：API 频率超限，请稍后重试。错误码：{result}")
-            return False
-        else:
-            print(f"企业微信推送失败，错误信息：{result}")
-            return False
-    except Exception as e:
-        print(f"企业微信推送出错: {e}")
-        return False
-
-
-# ================== 4. 备用：Server酱推送 ==================
-def send_to_serverchan(content):
-    """通过 Server酱 推送到微信（备用通道）"""
-    if not SERVERCHAN_SENDKEY:
-        return False
-
-    url = f"https://sctapi.ftqq.com/{SERVERCHAN_SENDKEY}.send"
-    data = {
-        "title": "【每日财经资讯】",
-        "desp": content
+    max_len = 4096 if msg_type == "markdown" else 2048
+    if len(content.encode('utf-8')) > max_len:
+        content = content.encode('utf-8')[:max_len-100].decode('utf-8', errors='ignore') + "\n\n...（截断）"
+    payload = {
+        "msgtype": msg_type,
+        "text" if msg_type == "text" else "markdown": {"content": content}
     }
     try:
-        response = requests.post(url, data=data, timeout=10)
-        if response.status_code == 200:
-            print("Server酱 推送成功！")
+        resp = requests.post(webhook_url, json=payload, timeout=10)
+        result = resp.json()
+        if result.get('errcode') == 0:
+            print("企业微信推送成功")
             return True
         else:
-            print(f"Server酱 推送失败，状态码：{response.status_code}")
+            print(f"企业微信推送失败: {result}")
             return False
     except Exception as e:
-        print(f"Server酱 推送出错: {e}")
+        print(f"推送异常: {e}")
         return False
 
+def send_to_serverchan(content):
+    if not SERVERCHAN_SENDKEY:
+        return False
+    url = f"https://sctapi.ftqq.com/{SERVERCHAN_SENDKEY}.send"
+    data = {"title": "【每日股票资讯】", "desp": content}
+    try:
+        resp = requests.post(url, data=data, timeout=10)
+        if resp.status_code == 200:
+            print("Server酱推送成功")
+            return True
+    except Exception as e:
+        print(f"Server酱异常: {e}")
+    return False
+
+def format_for_wecom(report):
+    lines = report.split('\n')
+    formatted = [line + "  " for line in lines if line.strip()]
+    separator = "\n<font color=\"comment\">---</font>\n"
+    return separator.join(formatted)
 
 # ================== 主程序 ==================
-def format_for_wecom(report):
-    """
-    将报告格式化为适合企业微信 Markdown 的格式
-    """
-    lines = report.split('\n')
-    formatted_lines = []
-
-    for line in lines:
-        # 防止手机端换行失效，每行末尾添加两个空格
-        if line.strip():
-            formatted_lines.append(line + "  ")
-
-    # 使用 <font color="comment">---</font> 作为分隔线强制换行
-    separator = "\n<font color=\"comment\">---</font>\n"
-
-    return separator.join(formatted_lines)
-
+def commit_and_push():
+    """将 history.json 的变更提交并推送到仓库（需在 workflow 中配置 git）"""
+    import subprocess
+    try:
+        subprocess.run(["git", "config", "user.email", "bot@example.com"], check=True)
+        subprocess.run(["git", "config", "user.name", "News Bot"], check=True)
+        subprocess.run(["git", "add", HISTORY_FILE], check=True)
+        subprocess.run(["git", "commit", "-m", "Update news history"], check=True)
+        subprocess.run(["git", "push"], check=True)
+        print("历史记录已提交到仓库")
+    except Exception as e:
+        print(f"提交历史记录失败: {e}")
 
 if __name__ == "__main__":
-    print("========== 新闻机器人启动 ==========")
-
-    # Step 1: 联网搜索
-    news_list = search_news(STOCK_KEYWORDS, num_results=3)
-    print(f"找到 {len(news_list)} 条新闻")
-
-    # Step 2: AI 总结
-    report = summarize_news(news_list)
-    print("总结完成，正在推送...")
-
-    # Step 3: 推送到企业微信
-    formatted_report = format_for_wecom(report)
-    push_success = send_to_wecom(formatted_report, msg_type="markdown")
-
-    # Step 4: 如果企业微信推送失败，尝试备用通道（Server酱）
-    if not push_success and SERVERCHAN_SENDKEY:
-        print("企业微信推送失败，尝试使用 Server酱 备用通道...")
+    print("========== 股票新闻机器人启动 ==========")
+    # 1. 加载已推送的历史链接
+    old_links = load_history()
+    print(f"已有历史新闻数: {len(old_links)}")
+    
+    # 2. 搜索最新新闻
+    all_news = search_news(STOCK_KEYWORDS, TARGET_SITES, num_results_per_site=2)
+    print(f"本次搜索到 {len(all_news)} 条新闻")
+    
+    # 3. 过滤出新新闻
+    new_news = [item for item in all_news if item['link'] not in old_links]
+    print(f"其中新新闻: {len(new_news)} 条")
+    
+    if not new_news:
+        print("没有新新闻，跳过推送")
+        exit(0)
+    
+    # 4. AI 总结新新闻
+    report = summarize_news(new_news)
+    
+    # 5. 推送到企业微信（自动拆分）
+    if WECHAT_WEBHOOK_KEY or WECHAT_WEBHOOK_URL:
+        formatted = format_for_wecom(report)
+        parts = split_long_message(formatted, max_bytes=4000)
+        success = True
+        for idx, part in enumerate(parts, 1):
+            title = f"**【股票资讯】第{idx}/{len(parts)}部分**\n\n"
+            if not send_to_wecom(title + part, msg_type="markdown"):
+                success = False
+        if not success and SERVERCHAN_SENDKEY:
+            send_to_serverchan(report)
+    elif SERVERCHAN_SENDKEY:
         send_to_serverchan(report)
-
+    
+    # 6. 更新历史记录并保存
+    new_links = old_links.union({item['link'] for item in new_news})
+    save_history(new_links)
+    print(f"历史记录已更新，当前总数: {len(new_links)}")
+    
+    # 7. 提交并推送 history.json 到仓库（需要 git 权限）
+    commit_and_push()
+    
     print("========== 运行结束 ==========")
