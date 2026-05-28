@@ -1,0 +1,4 @@
+feedparser
+requests
+openai
+ddgs    # 这一行是新加的
