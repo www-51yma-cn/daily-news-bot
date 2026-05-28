@@ -29,25 +29,20 @@ SITE_NAMES = {
     "cls.cn": "财联社",
     "nbd.com.cn": "每日经济新闻"
 }
+TARGET_SITES = list(SITE_NAMES.keys())
 
-TARGET_SITES = list(SITE_NAMES.keys())  # 使用映射中的域名
-
-# 历史记录文件路径
 HISTORY_FILE = "history.json"
-
-# 当前日期时间（用于 prompt）
 CURRENT_DATETIME = datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")
 
-# AI 提示词（允许详细总结，不限制一句话）
+# AI 提示词（允许详细总结）
 SYSTEM_PROMPT = f"""你是一个专业的股票财经分析师。当前时间是 {CURRENT_DATETIME}。
 请根据我提供的搜索结果，提取出最重要的股票推荐信息、热点板块、经济新闻。
 对于重点信息（如重要股票推荐、重大政策变化、市场大幅波动等），请适当展开详细说明，可以分析原因或影响。
 每条信息标注来源网站名称。
 最后按重要性排序，用清晰的格式呈现。"""
 
-# ================== 1. 联网搜索（限定网站，返回带中文名称） ==================
+# ================== 1. 联网搜索 ==================
 def search_news(keywords, sites, num_results_per_site=2):
-    """在指定网站内搜索关键词，返回新闻列表（含中文来源）"""
     all_news = []
     with DDGS() as ddgs:
         for kw in keywords:
@@ -59,18 +54,16 @@ def search_news(keywords, sites, num_results_per_site=2):
                     for r in results:
                         link = r.get('href')
                         if link:
-                            # 获取网站中文名称，如果未定义则使用域名
                             source_name = SITE_NAMES.get(site, site)
                             all_news.append({
                                 "title": r.get('title'),
                                 "snippet": r.get('body'),
                                 "link": link,
-                                "source": source_name,   # 中文名称
+                                "source": source_name,
                                 "timestamp": datetime.now().isoformat()
                             })
                 except Exception as e:
                     print(f"搜索 {query} 时出错: {e}")
-    # 去重（基于链接）
     unique = {}
     for item in all_news:
         link = item['link']
@@ -78,9 +71,8 @@ def search_news(keywords, sites, num_results_per_site=2):
             unique[link] = item
     return list(unique.values())
 
-# ================== 2. AI 总结（允许详细） ==================
+# ================== 2. AI 总结 ==================
 def summarize_news(news_list, retries=2):
-    """调用 DeepSeek 总结新闻，可详细展开重点"""
     if not news_list:
         return "今日暂无新财经资讯。"
 
@@ -89,7 +81,6 @@ def summarize_news(news_list, retries=2):
         base_url="https://api.deepseek.com",
         timeout=30.0,
     )
-
     news_text = json.dumps(news_list, ensure_ascii=False, indent=2)
     user_prompt = f"请用中文总结以下最新新闻，形成一份简报。对于重要信息可以详细分析：\n\n{news_text}"
 
@@ -195,7 +186,6 @@ def send_to_serverchan(content):
     return False
 
 def format_for_wecom(report):
-    """优化企业微信 Markdown 显示"""
     lines = report.split('\n')
     formatted = []
     for line in lines:
@@ -204,10 +194,9 @@ def format_for_wecom(report):
     separator = "\n<font color=\"comment\">---</font>\n"
     return separator.join(formatted)
 
-# ================== 5. 提交历史到仓库（可选） ==================
+# ================== 5. 提交历史到仓库 ==================
 def commit_and_push():
     import subprocess
-    # 检查是否有变更
     result = subprocess.run(["git", "status", "--porcelain", HISTORY_FILE], capture_output=True, text=True)
     if not result.stdout.strip():
         print("没有需要提交的变更")
@@ -234,29 +223,32 @@ def commit_and_push():
 if __name__ == "__main__":
     print("========== 股票新闻机器人启动 ==========")
     print(f"当前时间: {CURRENT_DATETIME}")
-    
-    # 1. 加载历史
+
     old_links = load_history()
     print(f"已有历史新闻数: {len(old_links)}")
-    
-    # 2. 搜索新新闻
+
     all_news = search_news(STOCK_KEYWORDS, TARGET_SITES, num_results_per_site=2)
     print(f"本次搜索到 {len(all_news)} 条新闻")
-    
-    # 3. 过滤新新闻
+
     new_news = [item for item in all_news if item['link'] not in old_links]
     print(f"其中新新闻: {len(new_news)} 条")
-    
+
+    # 无论有无新新闻，都发送一条消息
     if not new_news:
-        print("没有新新闻，跳过推送")
+        # 没有新新闻：发送“暂无新信息”消息
+        no_news_msg = f"## 📭 暂无新财经资讯\n**{CURRENT_DATETIME}**\n\n未发现新的股票推荐或重要经济新闻，请稍后再查看。"
+        if WECHAT_WEBHOOK_KEY or WECHAT_WEBHOOK_URL:
+            formatted = format_for_wecom(no_news_msg)
+            send_to_wecom(formatted, msg_type="markdown")
+        elif SERVERCHAN_SENDKEY:
+            send_to_serverchan(no_news_msg)
+        print("没有新新闻，已推送‘暂无信息’消息")
         exit(0)
-    
-    # 4. AI 总结
+
+    # 有新新闻：AI 总结并推送
     report = summarize_news(new_news)
-    
-    # 5. 推送
+
     if WECHAT_WEBHOOK_KEY or WECHAT_WEBHOOK_URL:
-        # 在报告开头加上时间标题
         title = f"## 📈 股市资讯简报\n**{CURRENT_DATETIME}**\n\n"
         full_report = title + report
         formatted = format_for_wecom(full_report)
@@ -270,13 +262,11 @@ if __name__ == "__main__":
             send_to_serverchan(report)
     elif SERVERCHAN_SENDKEY:
         send_to_serverchan(report)
-    
-    # 6. 更新历史
+
+    # 更新历史记录
     new_links = old_links.union({item['link'] for item in new_news})
     save_history(new_links)
     print(f"历史记录已更新，当前总数: {len(new_links)}")
-    
-    # 7. 提交历史（可选，如果失败不影响主流程）
+
     commit_and_push()
-    
     print("========== 运行结束 ==========")
