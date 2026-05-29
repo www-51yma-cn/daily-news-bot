@@ -1,4 +1,2 @@
-feedparser
 requests
 openai
-ddgs
