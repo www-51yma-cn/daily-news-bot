@@ -13,19 +13,39 @@ WECHAT_WEBHOOK_URL = os.environ.get('WECHAT_WEBHOOK_URL')
 SERVERCHAN_SENDKEY = os.environ.get('SERVERCHAN_SENDKEY')
 
 HISTORY_FILE = "history.json"
-NEWS_API_URL = "https://news.10jqka.com.cn/tapp/news/push/stock/?page=1&tag=&track=website&pagesize=400"
 
-# AI 提示词模板（可自行微调）
-SYSTEM_PROMPT = """你是一位专业的财经新闻分析师，擅长从快讯中筛选出对投资者最有价值的信息，如果出现你认为的重大并紧要的信息可加星号标注。
+# 同花顺 API
+THS_API_URL = "https://news.10jqka.com.cn/tapp/news/push/stock/?page=1&tag=&track=website&pagesize=400"
 
-请根据我提供的同花顺快讯列表，执行以下操作：
-1. **筛选重要信息**：只保留对股票投资有参考价值的快讯（例如：政策变化、行业动态、公司重大公告、机构观点、市场异动等）。忽略无关或琐碎的内容。
-2. **分类总结**：将筛选出的快讯按「宏观政策」、「行业动态」、「公司公告」、「机构观点」、「市场异动」等类别适当分类。
-3. **简洁描述**：每条快讯用一句话概括核心内容，并标注来源（即提供的“来源”字段）和时间。
+# 财联社 API
+CLS_API_URL = "https://www.cls.cn/api/cache?app=CailianpressWeb&name=telegraph&os=web&sv=8.7.9"
 
-最终输出格式要求清晰易读，可以使用 Markdown 标题（如 ### 一、宏观政策）和列表。不要输出任何无关的解释或开场白。"""
+# AI 提示词模板
+SYSTEM_PROMPT = """你是一位专业A股投研分析师，结合基本面、资金面、题材面解读新闻快讯，为选股、择时、风控提供依据。
 
-# ================== 1. 采集同花顺快讯（提取真实来源） ==================
+一、筛选标准
+保留：国家级政策、行业供需/价格/监管变化、上市公司业绩/重组/增减持/风险公告、机构评级调整、北向/龙虎榜/大宗等资金异动、重要经济数据。
+剔除：非财经资讯、公司常规公告、无实质内容的表态、重复旧闻。
+
+二、分类体系（Markdown三级标题）
+### 1. 宏观政策与经济数据
+### 2. 行业产业链（含价格、产能、集采、技术、项目）
+### 3. 上市公司重大公告
+### 4. 机构研报、评级与调研观点
+### 5. 市场资金、盘面与交易异动
+
+三、单条解读格式
+- 【时间】【来源】：事件简述 | 性质：利好/利空/题材催化/风险警示 | 关联：细分板块/核心个股 | 持续性：短期(1-3日)/中期(1周以上)
+
+四、附加分析模块（放在所有分类条目之后）
+1. 消息强度分级：按★★★（顶级）/★★（中等）/★（轻微）标注影响力度，排序展示高价值消息。
+2. 产业链传导分析：说明利好/利空的上下游延伸标的。
+3. 风控提示：列明潜在黑天鹅、利空个股/板块。
+4. 简要操作提醒：区分短线题材、中线基本面机会的应对思路（可客观的预测涨跌，并给逻辑）。
+
+全文使用Markdown排版，列表呈现，客观基于事实解读，可客观预测涨跌，并分析影响逻辑。"""
+
+# ================== 1. 采集同花顺快讯 ==================
 def fetch_10jqka_news():
     """直接调用同花顺快讯 API，从 digest 中提取括号内的来源，并清理摘要"""
     headers = {
@@ -33,13 +53,13 @@ def fetch_10jqka_news():
         "Referer": "https://news.10jqka.com.cn/",
     }
     try:
-        resp = requests.get(NEWS_API_URL, headers=headers, timeout=15)
+        resp = requests.get(THS_API_URL, headers=headers, timeout=15)
         if resp.status_code != 200:
-            print(f"API 请求失败，状态码: {resp.status_code}")
+            print(f"同花顺 API 请求失败，状态码: {resp.status_code}")
             return []
         data = resp.json()
         if data.get("code") != "200":
-            print(f"API 返回错误: {data.get('msg')}")
+            print(f"同花顺 API 返回错误: {data.get('msg')}")
             return []
         news_list = data.get("data", {}).get("list", [])
         all_news = []
@@ -49,11 +69,11 @@ def fetch_10jqka_news():
             url = item.get("url") or f"https://news.10jqka.com.cn/{item.get('id')}.html"
             raw_digest = item.get("digest", "")
 
-            # 从 digest 末尾提取括号内的来源（例如“（第一财经）”）
+            # 从 digest 末尾提取括号内的来源
             source_match = re.search(r'（([^（）]+)）$', raw_digest)
             if source_match:
-                source = source_match.group(1)          # 提取来源名称
-                snippet = re.sub(r'（[^（）]+）$', '', raw_digest).strip()  # 去掉括号及内容
+                source = source_match.group(1)
+                snippet = re.sub(r'（[^（）]+）$', '', raw_digest).strip()
             else:
                 source = "同花顺快讯"
                 snippet = raw_digest
@@ -68,15 +88,51 @@ def fetch_10jqka_news():
                 "timestamp": datetime.now().isoformat(),
                 "_ctime": ctime,
             })
-        # 按时间戳降序排序（最新在前）
-        all_news.sort(key=lambda x: x['_ctime'], reverse=True)
-        print(f"成功采集 {len(all_news)} 条快讯（已按最新排序）")
+        print(f"成功采集 {len(all_news)} 条同花顺快讯")
         return all_news
     except Exception as e:
-        print(f"采集出错: {e}")
+        print(f"同花顺采集出错: {e}")
         return []
 
-# ================== 2. 历史记录管理（去重） ==================
+# ================== 2. 采集财联社快讯 ==================
+def fetch_cls_news(page_size=30):
+    """采集财联社电报快讯"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://www.cls.cn/",
+    }
+    try:
+        resp = requests.get(CLS_API_URL, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            print(f"财联社 API 请求失败，状态码: {resp.status_code}")
+            return []
+        data = resp.json()
+        if data.get('errno') != 0:
+            print(f"财联社 API 返回错误: {data.get('errmsg')}")
+            return []
+        news_list = data.get('data', {}).get('roll_data', [])[:page_size]
+        all_news = []
+        for item in news_list:
+            ctime = int(item.get("ctime", 0))
+            ctime_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ctime))
+            link = f"https://www.cls.cn/detail/{item.get('id')}"
+            all_news.append({
+                "id": item.get("id"),
+                "title": item.get("title"),
+                "snippet": item.get("brief", ""),
+                "link": link,
+                "source": "财联社",
+                "pub_date": ctime_str,
+                "timestamp": datetime.now().isoformat(),
+                "_ctime": ctime,
+            })
+        print(f"成功采集 {len(all_news)} 条财联社快讯")
+        return all_news
+    except Exception as e:
+        print(f"财联社采集出错: {e}")
+        return []
+
+# ================== 3. 历史记录管理（去重） ==================
 def load_history():
     if not os.path.exists(HISTORY_FILE):
         return set()
@@ -110,7 +166,7 @@ def commit_and_push():
     except Exception as e:
         print(f"提交历史记录失败: {e}")
 
-# ================== 3. AI 智能筛选与总结 ==================
+# ================== 4. AI 智能筛选与总结 ==================
 def ai_summarize_news(news_list, retries=2):
     if not news_list:
         return None
@@ -118,7 +174,6 @@ def ai_summarize_news(news_list, retries=2):
         print("未配置 DEEPSEEK_API_KEY，跳过 AI 总结")
         return None
 
-    # 构建给 AI 的输入数据（包含标题、清理后的摘要、时间、真实来源）
     news_text = ""
     for idx, item in enumerate(news_list, 1):
         news_text += f"{idx}. 标题：{item['title']}\n   摘要：{item['snippet']}\n   时间：{item['pub_date']}\n   来源：{item['source']}\n\n"
@@ -132,7 +187,7 @@ def ai_summarize_news(news_list, retries=2):
                 model="deepseek-chat",
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": f"请处理以下快讯列表：\n{news_text}"}
+                    {"role": "user", "content": f"请处理以下新闻列表：\n{news_text}"}
                 ],
                 stream=False,
                 temperature=0.5,
@@ -148,7 +203,7 @@ def ai_summarize_news(news_list, retries=2):
             else:
                 return None
 
-# ================== 4. 企业微信推送（支持长消息拆分） ==================
+# ================== 5. 企业微信推送 ==================
 def split_long_message(content, max_bytes=4000):
     if len(content.encode('utf-8')) <= max_bytes:
         return [content]
@@ -212,23 +267,37 @@ def format_for_wecom(report):
     separator = "\n<font color=\"comment\">---</font>\n"
     return separator.join(formatted)
 
-# ================== 5. 主程序 ==================
+# ================== 6. 主程序 ==================
 def main():
+    # 时间窗口判断：北京时间 8:00-21:30 之外直接退出
+    now = datetime.now()
+    if now.hour < 8 or now.hour > 21 or (now.hour == 21 and now.minute >= 30):
+        print(f"当前时间 {now.strftime('%H:%M')} 不在运行窗口 (8:00-21:30)，退出")
+        return
+
     print("========== AI 智能快讯机器人启动 ==========")
     current_time = datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")
     print(f"当前时间: {current_time}")
 
-    # 1. 采集新闻（已按最新排序，且来源已提取）
-    all_news = fetch_10jqka_news()
+    # 1. 采集同花顺新闻
+    ths_news = fetch_10jqka_news()
+    # 2. 采集财联社新闻
+    cls_news = fetch_cls_news(page_size=30)
+    # 3. 合并
+    all_news = ths_news + cls_news
+    print(f"总计采集 {len(all_news)} 条快讯")
+
     if not all_news:
-        print("未采集到新闻，退出")
+        print("未采集到任何新闻，退出")
         return
 
-    # 2. 加载历史
+    # 4. 按时间排序（最新在前）
+    all_news.sort(key=lambda x: x['_ctime'], reverse=True)
+
+    # 5. 加载历史去重
     old_links = load_history()
     print(f"历史已推送 {len(old_links)} 条")
 
-    # 3. 过滤出新新闻
     new_news = [item for item in all_news if item['link'] not in old_links]
     print(f"新新闻数量: {len(new_news)}")
 
@@ -241,12 +310,11 @@ def main():
             send_to_serverchan(no_news_msg)
         return
 
-    # 4. AI 筛选总结（如果失败则降级为简单列表）
+    # 6. AI 总结
     ai_report = ai_summarize_news(new_news)
     if ai_report:
         final_report = f"## 🤖 AI 精选快讯简报\n**{current_time}**\n\n{ai_report}"
     else:
-        # 降级方案：直接输出原始新闻列表（保持最新在前的顺序）
         print("AI 总结失败，使用原始列表降级推送")
         lines = [f"## 📈 原始快讯列表（未筛选）\n**{current_time}**\n"]
         for idx, item in enumerate(new_news, 1):
@@ -256,7 +324,7 @@ def main():
             lines.append(f"   来源: {item['source']}\n")
         final_report = "\n".join(lines)
 
-    # 5. 推送
+    # 7. 推送
     if WECHAT_WEBHOOK_KEY or WECHAT_WEBHOOK_URL:
         formatted = format_for_wecom(final_report)
         parts = split_long_message(formatted, max_bytes=4000)
@@ -266,7 +334,7 @@ def main():
     elif SERVERCHAN_SENDKEY:
         send_to_serverchan(final_report)
 
-    # 6. 更新历史（记录所有新新闻的链接）
+    # 8. 更新历史记录
     new_links = old_links.union({item['link'] for item in new_news})
     save_history(new_links)
     print(f"历史记录已更新，总数: {len(new_links)}")
