@@ -1,8 +1,8 @@
 name: Daily News Bot
 
 on:
-  schedule:
-    - cron: '*/10 0-13 * * *'   # 每10分钟，北京时间 8:00-21:00
+  # schedule:
+   #  - cron: '*/10 0-13 * * *'   # 每10分钟，北京时间 8:00-21:00
   workflow_dispatch:
 
 jobs:
