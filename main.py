@@ -1,9 +1,10 @@
 import os
 import json
 import time
+import re
 import requests
 from datetime import datetime
-from openai import OpenAI   # 需要安装 openai 库
+from openai import OpenAI
 
 # ================== 配置区域 ==================
 DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY')
@@ -15,18 +16,18 @@ HISTORY_FILE = "history.json"
 NEWS_API_URL = "https://news.10jqka.com.cn/tapp/news/push/stock/?page=1&tag=&track=website&pagesize=400"
 
 # AI 提示词模板（可自行微调）
-SYSTEM_PROMPT = """你是一位专业的财经新闻分析师，擅长从快讯中筛选出对投资者最有价值的信息。
+SYSTEM_PROMPT = """你是一位专业的财经新闻分析师，擅长从快讯中筛选出对投资者最有价值的信息，如果出现你认为的重大并紧要的信息可加星号标注。
 
 请根据我提供的同花顺快讯列表，执行以下操作：
 1. **筛选重要信息**：只保留对股票投资有参考价值的快讯（例如：政策变化、行业动态、公司重大公告、机构观点、市场异动等）。忽略无关或琐碎的内容。
 2. **分类总结**：将筛选出的快讯按「宏观政策」、「行业动态」、「公司公告」、「机构观点」、「市场异动」等类别适当分类。
-3. **简洁描述**：每条快讯用一句话概括核心内容，并标注来源（同花顺快讯）和时间。
+3. **简洁描述**：每条快讯用一句话概括核心内容，并标注来源（即提供的“来源”字段）和时间。
 
 最终输出格式要求清晰易读，可以使用 Markdown 标题（如 ### 一、宏观政策）和列表。不要输出任何无关的解释或开场白。"""
 
-# ================== 1. 采集同花顺快讯 ==================
+# ================== 1. 采集同花顺快讯（提取真实来源） ==================
 def fetch_10jqka_news():
-    """直接调用同花顺快讯 API 获取新闻列表"""
+    """直接调用同花顺快讯 API，从 digest 中提取括号内的来源，并清理摘要"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer": "https://news.10jqka.com.cn/",
@@ -43,18 +44,33 @@ def fetch_10jqka_news():
         news_list = data.get("data", {}).get("list", [])
         all_news = []
         for item in news_list:
-            ctime = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(item.get("ctime", 0))))
+            ctime = int(item.get("ctime", 0))
+            ctime_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ctime))
             url = item.get("url") or f"https://news.10jqka.com.cn/{item.get('id')}.html"
+            raw_digest = item.get("digest", "")
+
+            # 从 digest 末尾提取括号内的来源（例如“（第一财经）”）
+            source_match = re.search(r'（([^（）]+)）$', raw_digest)
+            if source_match:
+                source = source_match.group(1)          # 提取来源名称
+                snippet = re.sub(r'（[^（）]+）$', '', raw_digest).strip()  # 去掉括号及内容
+            else:
+                source = "同花顺快讯"
+                snippet = raw_digest
+
             all_news.append({
                 "id": item.get("id"),
                 "title": item.get("title"),
-                "snippet": item.get("digest", ""),
+                "snippet": snippet,
                 "link": url,
-                "source": "同花顺快讯",
-                "pub_date": ctime,
+                "source": source,
+                "pub_date": ctime_str,
                 "timestamp": datetime.now().isoformat(),
+                "_ctime": ctime,
             })
-        print(f"成功采集 {len(all_news)} 条快讯")
+        # 按时间戳降序排序（最新在前）
+        all_news.sort(key=lambda x: x['_ctime'], reverse=True)
+        print(f"成功采集 {len(all_news)} 条快讯（已按最新排序）")
         return all_news
     except Exception as e:
         print(f"采集出错: {e}")
@@ -96,11 +112,13 @@ def commit_and_push():
 
 # ================== 3. AI 智能筛选与总结 ==================
 def ai_summarize_news(news_list, retries=2):
-    """调用 DeepSeek 对新闻列表进行筛选和总结"""
     if not news_list:
         return None
+    if not DEEPSEEK_API_KEY:
+        print("未配置 DEEPSEEK_API_KEY，跳过 AI 总结")
+        return None
 
-    # 构建给 AI 的输入数据（只包含标题、摘要、时间）
+    # 构建给 AI 的输入数据（包含标题、清理后的摘要、时间、真实来源）
     news_text = ""
     for idx, item in enumerate(news_list, 1):
         news_text += f"{idx}. 标题：{item['title']}\n   摘要：{item['snippet']}\n   时间：{item['pub_date']}\n   来源：{item['source']}\n\n"
@@ -128,7 +146,6 @@ def ai_summarize_news(news_list, retries=2):
             if attempt < retries - 1:
                 time.sleep(5)
             else:
-                # 如果 AI 彻底失败，降级为简单的原始列表
                 return None
 
 # ================== 4. 企业微信推送（支持长消息拆分） ==================
@@ -201,7 +218,7 @@ def main():
     current_time = datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")
     print(f"当前时间: {current_time}")
 
-    # 1. 采集新闻
+    # 1. 采集新闻（已按最新排序，且来源已提取）
     all_news = fetch_10jqka_news()
     if not all_news:
         print("未采集到新闻，退出")
@@ -229,7 +246,7 @@ def main():
     if ai_report:
         final_report = f"## 🤖 AI 精选快讯简报\n**{current_time}**\n\n{ai_report}"
     else:
-        # 降级方案：直接输出原始新闻列表
+        # 降级方案：直接输出原始新闻列表（保持最新在前的顺序）
         print("AI 总结失败，使用原始列表降级推送")
         lines = [f"## 📈 原始快讯列表（未筛选）\n**{current_time}**\n"]
         for idx, item in enumerate(new_news, 1):
@@ -249,7 +266,7 @@ def main():
     elif SERVERCHAN_SENDKEY:
         send_to_serverchan(final_report)
 
-    # 6. 更新历史（记录所有新新闻的链接，无论 AI 是否成功）
+    # 6. 更新历史（记录所有新新闻的链接）
     new_links = old_links.union({item['link'] for item in new_news})
     save_history(new_links)
     print(f"历史记录已更新，总数: {len(new_links)}")
