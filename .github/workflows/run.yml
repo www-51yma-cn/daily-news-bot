@@ -2,14 +2,14 @@ name: Daily News Bot
 
 on:
   schedule:
-    - cron: '*/30 0,1,2,3,4,5,6,7,8,9,10,11,12 * * *'
-  workflow_dispatch:  # 允许手动触发
+    - cron: '*/10 0-13 * * *'   # 每10分钟，北京时间 8:00-21:00
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # 允许推送代码到仓库
+      contents: write
     env:
       TZ: "Asia/Shanghai"
 
